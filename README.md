@@ -1,126 +1,134 @@
-# Medical Bill Fighter Backend
+# Medical Bill Fighter
 
-Node.js + Express API for hackathon prototype that ingests raw medical bill uploads (file + prompt), runs them through OCR + AI agents, enriches line items with mock cost benchmarks, and surfaces negotiation artifacts back to the frontend.
+Full-stack reference implementation that ingests raw medical bills, enriches them with OCR + LLM analysis, and surfaces the results through a modern Next.js UI. The repo intentionally co-locates all three major pieces so they can share configuration, fixtures, and deployment tooling.
 
-## Features
+## Stack Overview
+- **Node.js + Express API (`src/`)** – Handles uploads, persists state in SQLite (via Better-SQLite3), and orchestrates the Python pipeline.
+- **Python OCR + Agent pipeline (`backend/`)** – Uses pdfplumber/pytesseract for extraction, OpenAI agents for analysis + negotiation content, and an optional debate simulation for transcripts.
+- **Next.js 16 frontend (`frontend/`)** – React 19 app that uploads files, polls the API for bill state, and renders transcripts + insights.
 
-- In-memory (or file-backed) SQLite database managed through Better SQLite3
-- Upload pipeline that stores the file, queues OCR, and routes OCR callbacks into the structured bill store
-- REST endpoints for creating bills, handling OCR callbacks, and persisting simulated fighter/provider chat transcripts
-- Background OCR + agent pipeline driven by the Python CLI (Tesseract + OpenAI)
-- Mock CPT/HCPCS benchmark catalog with helper utilities to flag overpriced line items
-- Health-check endpoint and centralized error handling
-- TypeScript-first tooling with `ts-node-dev` for rapid iteration
+## System Architecture
+### 1. TypeScript API layer
+- `src/app.ts` wires CORS, logging, JSON parsing, and plugs in the `bills` router under `/api/bills` plus `/health` for readiness checks.
+- `src/routes/bills.ts` exposes:
+  - `POST /api/bills/upload` (multipart) – creates a shell bill, saves the file to `UPLOAD_DIR`, and enqueues the OCR/LLM pipeline.
+  - `POST /api/bills` – bypasses OCR when structured line items are already available.
+  - `GET /api/bills/:billId` – returns the aggregated bill, line items, analysis, transcripts, and status.
+  - `POST /api/bills/:billId/ocr-callback` – allows the Python side (or tests) to push structured data back in.
+  - `GET/POST /api/bills/:billId/agent-session` – persists the debate transcript once generated.
+- `src/services/orchestrationService.ts` spawns the Python runner via `child_process.spawn`, passing `PYTHON_BIN`, script path, timeout, and debate knobs defined in `src/config/env.ts`.
+- `src/db/connection.ts` bootstraps Better-SQLite3, applying auto migrations defined in `src/db/schema.ts` (tables for bills, line_items, analyses, scripts, agent_sessions).
 
-## Project Structure
+### 2. Python OCR + LLM pipeline
+- Entry point: `backend/run_pipeline_cli.py`, invoked with `--file`, `--prompt`, `--model`, and debate controls.
+- OCR: `backend/ocr/pipeline.py` tries `TextPDFExtractor` (pdfplumber) first, falls back to `ImageOCRExtractor` (pytesseract + pdf2image + poppler) so both digital and scanned PDFs are supported.
+- LLM agents: `backend/agents/pipeline.py` chains extraction → analysis → negotiation, powered by the `openai` SDK. Prompts live in `backend/agents/*.py`.
+- Debate system: `backend/agents/debate.py` and `DebateManager` stage multi-round exchanges between a “fighter” and “hospital” persona; results are summarized via `generate_debate_summary`.
 
+### 3. Next.js frontend
+- Located in `frontend/`, built with Next.js 16 / React 19 / TypeScript.
+- `src/app/page.tsx` renders the upload form, progress polling, and transcript viewer. It relies on `NEXT_PUBLIC_API_URL` (default `http://localhost:4000`).
+- Uses the shared `public/` assets for branding and Tailwind v4/PostCSS for styling.
+
+## Processing Lifecycle
+1. **Upload** – User submits prompt + bill via the frontend or direct `POST /api/bills/upload`. Multer stores the raw file in `UPLOAD_DIR`; a shell bill is inserted with status `pending`.
+2. **Pipeline orchestration** – `enqueueOcrJob` fires `run_pipeline_cli.py` with the stored path. Output is streamed over stdout as JSON.
+3. **OCR + Extraction** – Python extracts readable text (pdfplumber) or rasterizes pages for Tesseract when needed, then emits normalized line items.
+4. **LLM Analysis** – Agents annotate each line item with expected pricing, issues, and narrative negotiation assets. Optional debate transcripts are generated for richer UX.
+5. **Persistence** – The Node service writes line items + OCR text via `attachOcrResults`, logs analysis aggregates, and stores the transcript in `agent_sessions`.
+6. **Frontend polling** – UI hits `GET /api/bills/:billId` every few seconds to reflect status transitions and conversation updates.
+
+## Data Model Snapshot
+| Table | Purpose |
+| --- | --- |
+| `bills` | Core metadata (patient/provider, prompt, original filename, status, OCR text, file path). |
+| `line_items` | Normalized description/code/quantity/amount per bill. |
+| `analyses` | Stores aggregated cost comparisons and summary JSON. |
+| `scripts` | Negotiation email + phone script artifacts. |
+| `agent_sessions` | JSON transcript of the debate or medical agent dialogue. |
+
+## Configuration & Environment
+Create a root `.env` (see `.env.example`) and extend it with:
+
+| Variable | Description |
+| --- | --- |
+| `PORT` | Express listen port (default `4000`). |
+| `SQLITE_PATH` | SQLite filename or `:memory:` for ephemeral runs. |
+| `UPLOAD_DIR` | Directory for Multer uploads. Created automatically if missing. |
+| `PYTHON_BIN` | Absolute path to the Python interpreter (recommend the repo’s `.venv/bin/python`). |
+| `PYTHON_AGENT_SCRIPT` | Defaults to `backend/run_pipeline_cli.py`; change if you wrap the pipeline. |
+| `PYTHON_AGENT_TIMEOUT_MS` | Kill-switch for long OCR/LLM runs. |
+| `PYTHON_DEBATE_ROUNDS` / `PYTHON_DEBATE_DISABLED` | Control debate simulation volume. |
+| `OPENAI_API_KEY` | Required by the Python agents; load via `.env` or shell export so both Node and Python inherit it. |
+
+Frontend-specific config lives in `frontend/.env.local`:
 ```
-src/
-  config/        // environment loader
-  db/            // sqlite connection + schema
-  routes/        // Express routers
-  services/      // business logic + cost benchmarks
-  mocks/         // hackathon benchmark dataset
+NEXT_PUBLIC_API_URL=http://localhost:4000
 ```
 
 ## Getting Started
-
-### 1. Install dependencies
-
+### 1. Backend + Python pipeline
 ```bash
-npm install
-```
+# Install Node dependencies
+npm install  # or yarn install
 
-### 2. Install Python toolchain
-
-```bash
+# Create/refresh the Python virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r backend/requirements.txt
 ```
-
-Also install the native OCR dependencies (covered in `backend/README.md`):
-
-- Tesseract OCR
-- Poppler utilities
-
-### 3. Configure environment
-
-Copy `.env.example` to `.env` and tweak as needed. Use `SQLITE_PATH=:memory:` for volatile runs or provide a filename to persist across restarts. `UPLOAD_DIR` controls where Multer stores incoming files before they are handed to OCR.
-
-#### Python integration environment variables
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PYTHON_BIN` | `python3` | Interpreter used to spawn the CLI. |
-| `PYTHON_AGENT_SCRIPT` | `backend/run_pipeline_cli.py` | Path to the OCR + agent runner. |
-| `PYTHON_AGENT_TIMEOUT_MS` | `120000` | Timeout before the Node process kills the Python job. |
-| `PYTHON_DEBATE_ROUNDS` | `3` | Number of fighter vs. hospital debate rounds to generate. |
-| `PYTHON_DEBATE_DISABLED` | `false` | Set to `true` to skip debate/transcript generation. |
-
-### 4. Run the API in development
-
+Install native OCR binaries once per machine:
 ```bash
-npm run dev
+brew install tesseract
+brew install poppler
+```
+Verify tooling:
+```bash
+source .venv/bin/activate
+which python
+python - <<'PY'
+import pdfplumber, pytesseract, openai
+print("OCR stack ready")
+PY
 ```
 
-The Express API listens on [http://localhost:4000](http://localhost:4000) by default. Use this origin as the `NEXT_PUBLIC_API_URL` for the frontend (see below).
-
-### 5. Run the Next.js frontend
-
+### 2. Frontend
 ```bash
 cd frontend
 npm install
 NEXT_PUBLIC_API_URL=http://localhost:4000 npm run dev
 ```
+The app serves at http://localhost:3000.
 
-The UI runs on [http://localhost:3000](http://localhost:3000) and proxies all uploads + polling back to the API server.
-
-### 6. Build for production
-
+### 3. Running everything together
 ```bash
-npm run build
-npm start
+# Terminal 1 – backend API
+npm run dev  # or yarn dev
+
+# Terminal 2 – Next.js UI
+cd frontend
+npm run dev
 ```
+Hit `POST /api/bills/upload` via the UI, then monitor the backend logs for Python pipeline output. Health check: `curl http://localhost:4000/health`.
 
-### 7. Run the API test suite
+## Useful Scripts
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Starts the Express API with `ts-node-dev` (hot reload). |
+| `npm run build && npm start` | Type-checks, emits `dist/`, and serves the compiled API. |
+| `npm test` | Runs the Jest suite in `src/__tests__/`. |
+| `python backend/run_pipeline_cli.py --file bill.pdf --prompt "Focus on imaging"` | Standalone pipeline smoke-test without the Node API. |
+| `cd frontend && npm run build && npm start` | Production-grade Next.js build. |
 
-```bash
-npm test
-```
+## Troubleshooting
+- **`ModuleNotFoundError: pdfplumber`** – Activate the correct `.venv` (`source .venv/bin/activate`) and re-run `pip install -r backend/requirements.txt`. Ensure `PYTHON_BIN` points to that interpreter.
+- **`TesseractNotFoundError` or empty OCR output** – Install `tesseract` + `poppler`, confirm `tesseract --version` works, and provide high-resolution PDFs.
+- **Pipeline timeouts** – Increase `PYTHON_AGENT_TIMEOUT_MS`, or temporarily disable the debate simulation by setting `PYTHON_DEBATE_DISABLED=true`.
+- **Uploads stuck in `pending`** – Check `uploads/` permissions and backend logs; `run_pipeline_cli.py` writes errors to stderr which surface through the Node process.
 
-## API Overview
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/api/bills/upload` | Multipart upload (fields: `file`, `prompt`, optional patient/provider metadata). Stores shell bill, queues OCR job, returns `{ billId, status }`. |
-| `POST` | `/api/bills/:billId/ocr-callback` | Called by OCR service with structured line items + optional raw text; persists data and immediately dispatches to the medical agent. |
-| `POST` | `/api/bills` | Directly create a bill when structured line items are already available (bypasses OCR). |
-| `GET` | `/api/bills/:billId` | Fetch full bill snapshot, including latest fighter/provider transcript. |
-| `POST/GET` | `/api/bills/:billId/agent-session` | Save or fetch the latest fighter/provider chat transcript. |
-| `GET` | `/health` | Basic heartbeat for ops checks. |
-
-All non-upload endpoints accept/return JSON. Validation is handled via `zod`, and mock benchmark utilities automatically annotate line items with variance information.
-
-## End-to-End Flow
-
-1. **Upload** – Frontend sends prompt + file to `POST /api/bills/upload`. Backend stores metadata, marks status `upload_received`, and fires off the Python CLI runner in the background.
-2. **Python pipeline** – `backend/run_pipeline_cli.py` performs OCR, extraction, analysis, negotiation, and the debate simulation. Once results are ready, the Node backend ingests the structured line items via its existing callback logic and persists the generated fighter/provider transcript.
-3. **Frontend consumption** – UI polls `GET /api/bills/:billId` (or eventually subscribes via websockets) to show status transitions, annotated line items, and the simulated provider conversation.
-
-## Next.js Frontend
-
-The dedicated UI lives in `frontend/` and is built with Next.js 16 + React 19. It speaks to this backend by:
-
-1. Sending uploads to `POST /api/bills/upload` with the prompt + file.
-2. Polling `GET /api/bills/:billId` every few seconds to reflect OCR progress and stream the agent debate transcript.
-3. Surfacing the activity log, bill status, and full conversation in a modern interface.
-
-Set `NEXT_PUBLIC_API_URL` (defaults to `http://localhost:4000`) so the browser knows where to send requests. When deploying, host the backend + Next.js app separately or behind the same origin—only the environment variable needs to change.
-
-## Next Steps
-
-- Add automated tests (service-level + route smoke tests)
-- Extend mock benchmarks or connect to live pricing APIs
-- Wire WebSocket/SSE channel for real-time agent exchanges
-- Add request logging persistence and metrics for production readiness
+## Contributing / Next Steps
+- Expand automated tests (service-level, integration between Node and Python).
+- Add WebSocket or SSE updates instead of polling for near-real-time transcripts.
+- Integrate real cost benchmark data or external pricing APIs in `services/costBenchmarkService.ts`.
+- Containerize the stack (Dockerfile + docker-compose) for parity between contributors and CI.
