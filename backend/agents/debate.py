@@ -112,7 +112,7 @@ Present your opening argument identifying:
 3. Items that appear miscoded or inflated
 4. Specific evidence from the bill data
 
-Be concise, evidence-based, and focus on the strongest patient-side arguments. Keep your response to 75-100 words."""
+Be concise, evidence-based, and focus on the strongest patient-side arguments. Keep your response to ~75 words."""
         else:
             # Response to opponent
             user_prompt = f"""You are responding in Round {round_number}. The hospital representative just said:
@@ -134,7 +134,7 @@ Bill Summary:
 Structured Bill Data:
 {bill_json_str}
 
-Provide a concise rebuttal (150-250 words) that counters their arguments and reinforces the patient's position."""
+Provide a concise rebuttal (~75 words) that counters their arguments and reinforces the patient's position."""
         
         try:
             messages = [
