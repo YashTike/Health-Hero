@@ -83,15 +83,6 @@ Install native OCR binaries once per machine:
 brew install tesseract
 brew install poppler
 ```
-Verify tooling:
-```bash
-source .venv/bin/activate
-which python
-python - <<'PY'
-import pdfplumber, pytesseract, openai
-print("OCR stack ready")
-PY
-```
 
 ### 2. Frontend
 ```bash
@@ -103,12 +94,12 @@ The app serves at http://localhost:3000.
 
 ### 3. Running everything together
 ```bash
-# Terminal 1 – backend API
+# Terminal 1 – backend API (Inside venv)
 npm run dev  # or yarn dev
 
 # Terminal 2 – Next.js UI
 cd frontend
-npm run dev
+NEXT_PUBLIC_API_URL=http://localhost:4000 npm run dev
 ```
 Hit `POST /api/bills/upload` via the UI, then monitor the backend logs for Python pipeline output. Health check: `curl http://localhost:4000/health`.
 
