@@ -1,0 +1,1 @@
+Sample medical bill attachment used for API upload tests.
